@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Transcriptor - iPhone XS style</title>
+<style>
+  body{
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial;
+    background: linear-gradient(180deg,#0f172a,#071029);
+    color:#e6eef8;
+    margin:0;
+    display:flex;
+    min-height:100vh;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    box-sizing:border-box;
+  }
+  .card{
+    width:100%;
+    max-width:820px;
+    background:rgba(255,255,255,0.03);
+    border-radius:14px;
+    padding:18px;
+    box-shadow:0 6px 30px rgba(2,6,23,0.6);
+    backdrop-filter: blur(6px);
+  }
+  h1{ margin:4px 0 12px; font-size:18px; letter-spacing:0.6px; }
+  textarea{
+    width:100%;
+    height:320px;
+    background:rgba(0,0,0,0.45);
+    color:#e6eef8;
+    border:1px solid rgba(255,255,255,0.05);
+    padding:12px;
+    border-radius:8px;
+    resize:vertical;
+    font-size:16px;
+    line-height:1.45;
+  }
+  .controls{
+    display:flex;
+    gap:10px;
+    margin-top:12px;
+    flex-wrap:wrap;
+  }
+  button{
+    flex:1 1 150px;
+    padding:12px 14px;
+    border-radius:10px;
+    border:0;
+    font-weight:600;
+    font-size:15px;
+    cursor:pointer;
+    background:linear-gradient(180deg,#1f2937,#0f1724);
+    color:#f1f5f9;
+    box-shadow: 0 6px 18px rgba(2,6,23,0.6);
+  }
+  button.warn{ background:linear-gradient(180deg,#b45309,#78350f); }
+  button.ghost{ background:transparent; border:1px solid rgba(255,255,255,0.06); }
+  .status{
+    margin-top:10px;
+    font-size:13px;
+    color:#cbd5e1;
+  }
+  .small{ font-size:12px; color:#94a3b8; margin-top:6px; }
+  @media (max-width:420px){
+    textarea{ height:260px; }
+    button{ flex:1 1 48%; }
+  }
+</style>
+</head>
+<body>
+  <div class="card" role="application" aria-label="Transcriptor de voz">
+    <h1>Transcriptor (imitando iPhone XS) — 4 botones</h1>
+
+    <textarea id="out" placeholder="Aquí aparecerá la transcripción. Di 'coma' o 'punto' si quieres puntuación..." aria-label="Transcripción"></textarea>
+
+    <div class="controls" role="toolbar">
+      <button id="startPauseBtn">Iniciar grabación</button>
+      <button id="stopBtn" class="warn">Detener</button>
+      <button id="copyBtn" class="ghost">Copiar texto</button>
+      <button id="clearBtn" class="ghost">Limpiar texto</button>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
+      <button id="permBtn" style="flex:1 1 200px;">Habilitar permisos de micrófono</button>
+      <div style="flex:2 1 200px;">
+        <div class="status" id="status">Estado: detenido.</div>
+        <div class="small" id="hint">Consejo: di las palabras <em>coma</em> y <em>punto</em> para insertar puntuación. Si no, no se inserta nada por defecto.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+ Transcriptor minimal: start/pause toggle, stop, copy, clear.
+ Reglas de puntuación: reemplazar las palabras "coma" y "punto" por ',' y '.'
+ Evitar solapamientos repetidos entre resultados finales.
+*/
+
+const out = document.getElementById('out');
+const startPauseBtn = document.getElementById('startPauseBtn');
+const stopBtn = document.getElementById('stopBtn');
+const copyBtn = document.getElementById('copyBtn');
+const clearBtn = document.getElementById('clearBtn');
+const permBtn = document.getElementById('permBtn');
+const status = document.getElementById('status');
+
+let recognition = null;
+let recognizing = false;
+let stopped = true; // true when fully stopped
+let interimTranscript = '';
+let finalTranscript = '';
+let lastFinalSnapshot = ''; // para deduplicado
+let lastResultIndex = 0;
+
+// Feature detection
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+
+function updateStatus(){
+  if (recognizing) status.textContent = 'Estado: grabando (puedes pausar).';
+  else if (!stopped) status.textContent = 'Estado: en pausa (puedes continuar).';
+  else status.textContent = 'Estado: detenido.';
+}
+
+function initRecognition(){
+  if (!SpeechRecognition) return null;
+  const r = new SpeechRecognition();
+  r.continuous = true;           // seguir escuchando
+  r.interimResults = true;       // queremos interinos
+  r.lang = 'es-ES';              // lenguaje: español de España (ajustable)
+  r.maxAlternatives = 1;
+  r.onresult = onResult;
+  r.onerror = onError;
+  r.onend = onEnd;
+  return r;
+}
+
+function cleanPunctuationFromText(s){
+  // Reemplaza "coma" y "punto" como palabras aisladas por ',' y '.'
+  // Solo en final transcripts (aplicar fuera de aquí a resultados finales)
+  // Usamos regex para reemplazar palabras en español y evitar conexiones extrañas.
+  // Nota: mantenemos minúsculas por comparación
+  return s.replace(/\bcoma\b/gi, ',')
+          .replace(/\bpunto\b/gi, '.')
+          .replace(/\s+([,\.])/g, '$1') // quitar espacio antes de la puntuación
+          .replace(/([,\.])([^\s])/g, '$1 $2'); // asegurar espacio después si falta
+}
+
+function removeOverlap(existing, addition){
+  // Encuentra el mayor sufijo de existing que coincide con prefijo de addition (palabras).
+  // Esto ayuda a recortar repeticiones cuando la API solapa.
+  if (!existing) return addition;
+  const exWords = existing.trim().split(/\s+/);
+  const addWords = addition.trim().split(/\s+/);
+  // buscamos mayor k tal que last k words of exWords == first k words of addWords
+  const maxK = Math.min(exWords.length, addWords.length);
+  for (let k = maxK; k>0; k--){
+    const exSlice = exWords.slice(exWords.length - k).join(' ').toLowerCase();
+    const addSlice = addWords.slice(0,k).join(' ').toLowerCase();
+    if (exSlice === addSlice){
+      return addWords.slice(k).join(' ');
+    }
+  }
+  return addition;
+}
+
+function onResult(event){
+  // event.results es una colección; procesamos desde event.resultIndex
+  interimTranscript = '';
+  let newFinalPieces = [];
+
+  for (let i = event.resultIndex; i < event.results.length; ++i){
+    const res = event.results[i];
+    const transcript = res[0].transcript;
+    if (res.isFinal){
+      let processed = transcript.trim();
+      processed = cleanPunctuationFromText(processed);
+      // evitar solapamiento con finalTranscript actual
+      processed = removeOverlap(finalTranscript, processed);
+      if (processed) {
+        newFinalPieces.push(processed);
+      }
+    } else {
+      interimTranscript += transcript;
+    }
+  }
+
+  // Append new final pieces to finalTranscript
+  if (newFinalPieces.length){
+    // unir con espacio y normalizar espacios
+    if (finalTranscript && !finalTranscript.match(/\s$/)) finalTranscript += ' ';
+    finalTranscript += newFinalPieces.join(' ').replace(/\s+/g,' ');
+    // normalizar espacios y mayúsculas mínimas: no forzamos mayúsculas
+  }
+
+  // Mostrar: final + interino (interino en gris si quieres)
+  out.value = finalTranscript + (interimTranscript ? ' ' + interimTranscript : '');
+  lastFinalSnapshot = finalTranscript;
+}
+
+function onError(e){
+  console.error('SpeechRecognition error', e);
+  // Mostrar al usuario de forma amigable
+  if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+    status.textContent = 'Permiso denegado o bloqueado para el micrófono. Toca "Habilitar permisos de micrófono".';
+  } else if (e.error === 'no-speech') {
+    status.textContent = 'No se detectó voz. Intenta hablar más cerca del micrófono.';
+  } else {
+    status.textContent = 'Error de reconocimiento: ' + (e.error || 'desconocido');
+  }
+  recognizing = false;
+  updateStatus();
+}
+
+function onEnd(){
+  // se llama cuando recognition.stop() o la API se detiene por sí misma.
+  // Si no estamos en "stopped" (es decir, solo pausa), no reiniciar automáticamente.
+  if (stopped){
+    recognizing = false;
+    updateStatus();
+    return;
+  }
+  // Si no fue intencional (por ejemplo, la API quiere reiniciar),
+  // reiniciamos automáticamente para mantener continuous behavior.
+  if (!recognizing && !stopped){
+    try {
+      // pequeño delay para evitar loops infinitos
+      setTimeout(() => {
+        recognition.start();
+      }, 300);
+    } catch (err) {
+      console.warn('No se pudo reiniciar automáticamente:', err);
+    }
+  }
+}
+
+function startRecognition(){
+  if (!SpeechRecognition){
+    alert('Tu navegador/visualmente HTML Viewer no soporta SpeechRecognition. Usa Safari actual o una app compatible.');
+    return;
+  }
+  if (!recognition) recognition = initRecognition();
+  try {
+    recognition.start();
+    recognizing = true;
+    stopped = false;
+    updateStatus();
+    startPauseBtn.textContent = 'Pausar grabación';
+  } catch (e){
+    console.warn('start error', e);
+  }
+}
+
+function pauseRecognition(){
+  if (!recognition) return;
+  // Paramos la escucha pero no marcamos "stopped"
+  recognizing = false;
+  try {
+    recognition.stop();
+  } catch (e){ console.warn(e); }
+  startPauseBtn.textContent = 'Continuar grabación';
+  updateStatus();
+}
+
+function stopRecognition(){
+  // Detener completamente (para reanudar desde cero si se desea)
+  stopped = true;
+  recognizing = false;
+  if (recognition){
+    try { recognition.stop(); recognition.onresult = null; recognition.onend = null; } catch(e){}
+    recognition = null;
+  }
+  startPauseBtn.textContent = 'Iniciar grabación';
+  updateStatus();
+  // el texto final queda en el textarea (no lo limpiamos)
+}
+
+// Permisos: intentar obtener getUserMedia para forzar prompt de permiso
+async function requestMicPermission(){
+  try {
+    await navigator.mediaDevices.getUserMedia({ audio: true });
+    status.textContent = 'Permiso de micrófono concedido (o mostrado).';
+  } catch (err){
+    status.textContent = 'No se otorgó permiso de micrófono: ' + (err && err.message ? err.message : 'denegado');
+  }
+}
+
+startPauseBtn.addEventListener('click', () => {
+  if (!SpeechRecognition){
+    alert('SpeechRecognition no disponible en este entorno. Prueba en Safari actualizado o un navegador con soporte.');
+    return;
+  }
+  if (recognizing){
+    // actualmente grabando -> pausar
+    pauseRecognition();
+  } else {
+    // si estaba detenido por completo (stopped true) creamos nuevo recognition
+    if (stopped){
+      finalTranscript = finalTranscript || ''; // conserva texto ya escrito
+      recognition = initRecognition();
+      stopped = false;
+    }
+    startRecognition();
+  }
+});
+
+stopBtn.addEventListener('click', () => {
+  stopRecognition();
+});
+
+// Copiar texto
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(out.value);
+    copyBtn.textContent = 'Copiado ✓';
+    setTimeout(()=> copyBtn.textContent = 'Copiar texto', 1400);
+  } catch (e){
+    // fallback
+    const ta = out;
+    ta.select();
+    document.execCommand('copy');
+    copyBtn.textContent = 'Copiado ✓';
+    setTimeout(()=> copyBtn.textContent = 'Copiar texto', 1400);
+  }
+});
+
+// Limpiar texto
+clearBtn.addEventListener('click', () => {
+  finalTranscript = '';
+  interimTranscript = '';
+  out.value = '';
+  lastFinalSnapshot = '';
+  clearBtn.textContent = 'Limpiado ✓';
+  setTimeout(()=> clearBtn.textContent = 'Limpiar texto', 900);
+});
+
+// Permisos botón
+permBtn.addEventListener('click', () => {
+  requestMicPermission();
+  // también intentamos inicializar recognition para detectar si está disponible
+  if (!SpeechRecognition){
+    status.textContent = 'Atención: SpeechRecognition no está disponible en este entorno HTML. Es posible que HTML Viewer no permita la API.';
+  } else {
+    status.textContent = 'Se solicitó permiso. Si el navegador lo permite, acepta el diálogo de micrófono.';
+  }
+});
+
+// si el usuario cierra la página o cambia, asegúrate de detener
+window.addEventListener('beforeunload', () => {
+  try { if (recognition) recognition.stop(); } catch(e){}
+});
+
+// inicial status
+updateStatus();
+</script>
+</body>
+</html>
