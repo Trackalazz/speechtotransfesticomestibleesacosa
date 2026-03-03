@@ -145,8 +145,24 @@ function cleanPunctuationFromText(s){
   // Nota: mantenemos minúsculas por comparación
   return s.replace(/\bcoma\b/gi, ',')
           .replace(/\bpunto\b/gi, '.')
-          .replace(/\s+([,\.])/g, '$1') // quitar espacio antes de la puntuación
-          .replace(/([,\.])([^\s])/g, '$1 $2'); // asegurar espacio después si falta
+          .replace(/\s+([,\.;:!?])/g, '$1') // quitar espacio antes de la puntuación
+          .replace(/([,\.;:!?])([^\s])/g, '$1 $2'); // asegurar espacio después si falta
+}
+
+function applyTranscriptRules(text){
+  // Regla 1: minúsculas salvo la palabra justo después de un punto.
+  // Regla 2: signos de puntuación sin espacio previo.
+  const normalized = text
+    .replace(/\s+([,\.;:!?])/g, '$1')
+    .replace(/([,\.;:!?])([^\s])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  // Únicamente mayúscula después de '.' (cuando hay una letra)
+  return normalized.replace(/(\.\s+)([a-záéíóúñü])/g, (_, sep, letter) => {
+    return sep + letter.toUpperCase();
+  });
 }
 
 function removeOverlap(existing, addition){
@@ -193,7 +209,7 @@ function onResult(event){
     // unir con espacio y normalizar espacios
     if (finalTranscript && !finalTranscript.match(/\s$/)) finalTranscript += ' ';
     finalTranscript += newFinalPieces.join(' ').replace(/\s+/g,' ');
-    // normalizar espacios y mayúsculas mínimas: no forzamos mayúsculas
+    finalTranscript = applyTranscriptRules(finalTranscript);
   }
 
   // Mostrar: final + interino (interino en gris si quieres)
